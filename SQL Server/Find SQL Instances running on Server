@@ -1,0 +1,35 @@
+Find SQL Instances running on Server
+------------------------------------
+
+
+CMD:
+SQLCMD -L
+OSQL -L
+
+
+Start | Run | type Services.msc and look for all entries with "Sql Server (Instance Name)".
+
+CMD:
+reg query "HKLM\Software\Microsoft\Microsoft SQL Server\Instance Names\SQL
+
+Powershell:
+Get-ItemProperty ‘HKLM:\Software\Microsoft\Microsoft SQL Server\Instance Names\SQL’
+Get-Service | ?{ $_.DisplayName -like "SQL Server (*" }
+
+
+
+
+
+-- T-SQL Query to find list of Instances Installed on a machine
+DECLARE @GetInstances TABLE
+( Value nvarchar(100),
+ InstanceNames nvarchar(100),
+ Data nvarchar(100))
+
+Insert into @GetInstances
+EXECUTE xp_regread
+  @rootkey = 'HKEY_LOCAL_MACHINE',
+  @key = 'SOFTWARE\Microsoft\Microsoft SQL Server',
+  @value_name = 'InstalledInstances'
+
+Select InstanceNames from @GetInstances 
