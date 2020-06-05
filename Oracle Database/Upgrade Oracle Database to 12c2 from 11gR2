@@ -1,0 +1,176 @@
+Upgrade Oracle Database to 12c2 from 11gR2
+------------------------------------------
+
+
+
+Complete Checklist for Manual Upgrades to Non-CDB Oracle Database 12c Release 2 (12.2) (Doc ID 2173141.1)
+---------------------------------------------------------------------------------------------------------
+https://support.oracle.com/epmos/faces/DocumentDisplay?_afrLoop=140978780113071&id=2173141.1&_afrWindowMode=0&_adf.ctrl-state=15oqcd0lwb_353#aref_section31
+
+
+
+
+Step 1: Upgrade Path for 12.2 Oracle database
+	Minimum version of the database that can be directly upgraded to Oracle 12c Release 2 (12.2)
+	Source Database		Target Database
+	11.2.0.3/11.2.0.4	12.2.x
+	12.1.0.1/12.1.0.2	12.2.x
+
+Step 2: Requirements and recommendations for source database
+	Take back up of the source database.
+	Disable cronjobs
+	Timezone should less than or equal to target database timezone version.
+
+Step3: Requirements and recommendations for target ORACLE_HOME
+	Install 12.2.0.1
+	Download and install latest PSU if any
+	Copy spfile or pfile from source ORACLE_HOME (under $ORACLE_HOME/dbs) to target home
+	Remove any _parameter, obsolete and deprecated parameters in pfile
+	Note min value of COMPATIBLE parameter to upgrade 12.2 is '11.2.0'
+	Apply patch 29213893 on target ORACLE_HOME to avoid ORA-01422 error - refer: Database Upgrade to 12.2, 18c, 19c fails with ORA-01422, ORA-06512 for SYS.DBMS_STATS (Doc ID 2525596.1)
+
+Step 4: Check the health of the source database
+	Execute dbupgdiag.sql (note 556610.1) to download this script) and verify whether there are any INVALID components or objects owned by SYS/SYSTEM. If any, fix them before proceeding to upgrade the database. You can execute utlrp.sql multiple times to VALIDate them, if still objects are INVALID, create a service request with Oracle support.
+	Execute utlrp.sql multiple times and verify there are no INVALID objects.
+
+
+
+
+Step 5: Pre-upgrade checks
+--------------------------
+	Clean up database
+		Empty the recycle bin
+			SQL> purge recyclebin;
+			SQL> purge dba_recyclebin;
+		Check for INVALID objects in SYS and SYSTEM
+		Check for duplicate objects in SYS and SYSTEM
+			set pause off
+			set heading off
+			set pagesize 0
+			set feedback off
+			set verify off
+			spool dropsys.sql
+			select 'DROP ' || object_type || ' SYSTEM.' || object_name || ';' from dba_objects where object_name not in ('AQ$_SCHEDULES_PRIMARY','DBMS_REPCAT_AUTH','AQ$_SCHEDULES','PRODUCT_USER_PROFILE','SQLPLUS_PRODUCT_PROFILE','PRODUCT_PRIVS','HELP','HELP_TOPIC_SEQ') and object_name||object_type in (select object_name||object_type from dba_objects where owner = 'SYS') and owner = 'SYSTEM';
+			spool off
+			exit	
+		Check for INVALID, mandatory, obsolete components
+
+	Check materialized views
+		Check the status of all materialized views (MV), and refresh any materialized views that are not fresh.
+		Check the size of your materialized view logs. If any materialized view logs have non-zero rows, then refresh the base table materialized views.
+		Check the size of direct loader logs and PMOP logs (partition maintenance operation logs). If any direct loader logs or PMOP logs have non-zero rows, then refresh the MVs indicated by the logs
+		Before upgrading Oracle Database, you must wait until all materialized views have completed refreshing.
+		SQL> SELECT o.name FROM sys.obj$ o, sys.user$ u, sys.sum$ s WHERE o.type# = 42 AND bitand(s.mflags, 8) =8;
+
+	Performance
+		SQL> EXEC DBMS_STATS.GATHER_DICTIONARY_STATS;
+		PL/SQL procedure successfully completed.
+		SQL>
+
+	Checking Time zone settings
+		Default time zone for Oracle database 12.2 is V26
+		Time zone should less than or equal to target database time zone version. If source is having higher time zone, then apply time zone patch on target ORACLE_HOME to match the source.
+			SQL> select TZ_VERSION from registry$database;
+			TZ_VERSION
+			----------
+					1
+			SQL>
+
+	Back up the database
+		rman "target / nocatalog"
+		RUN
+		{
+		ALLOCATE CHANNEL ch1 TYPE DISK;
+		BACKUP DATABASE FORMAT 'some_backup_directory%U' TAG before_upgrade;
+		BACKUP CURRENT CONTROLFILE FORMAT 'controlfile location and name';
+		}
+
+	Ensure no files are in Back up mode before starting the upgrade
+		SQL> SELECT * FROM v$backup WHERE status != 'NOT ACTIVE';
+		no rows selected
+		SQL>
+
+	Resolve Outstanding Distributed Transactions Before Upgrade
+		SQL> Select * from dba_2pc_pending;
+		If the query in the previous step returns any rows, then issue the following statements:
+		SQL> select local_tran_id FROM dba_2pc_pending;
+		SQL> execute dbms_transaction.purge_lost_db_entry('');
+		SQL> commit;
+
+
+
+
+Step 6: Preupgrade step
+-----------------------
+
+	Execute Preupgrade script from source home
+	$SOURCE_ORACLE_HOME/jdk/bin/java -jar $TARGET_ORACLE_HOME/rdbms/admin/preupgrade.jar FILE TEXT DIR output_dir
+		FILE - Use this option to direct output to a file
+		TEXT - Use this option to specify log should be in Text format (other option is to have XML output)
+		DIR - Logs will be created under <output_dir>
+
+	usolydev04:DATAMART:/export/home/oracle$ /u01/app/oracle/PROD/product/11.2.0.4/jdk/bin/java -jar  /u01/app/oracle/PROD/product/12.2.0.1/rdbms/admin/preupgrade.jar
+	Preupgrade generated files:
+		/u01/app/oracle/PROD/cfgtoollogs/database/preupgrade/preupgrade.log
+		/u01/app/oracle/PROD/cfgtoollogs/database/preupgrade/preupgrade_fixups.sql
+		/u01/app/oracle/PROD/cfgtoollogs/database/preupgrade/postupgrade_fixups.sql
+	usolydev04:DATAMART:/export/home/oracle$
+	
+	Fix recommendations provided in preupgrade.log
+	Execute preupgrade_fixups.sql
+	SQL>@preupgrade_fixups.sql
+	
+	
+	
+Step7: Upgrade Database to 12.2
+-------------------------------
+	Shut down the database.
+		SQL> SHUTDOWN IMMEDIATE	
+	Set the environment variables to point to target ORACLE_HOME
+	Start DB in upgrade mode from target ORACLE_HOME
+		CONNECT / AS SYSDBA
+		SQL> startup upgrade;
+		SQL> exit
+		cd $ORACLE_HOME/bin
+		./dbupgrade 
+			dbupgrade -n 2 -l /u01/app/		n=parallelism, -l= log location
+			dbupgrade calls below catctl.pl & catupgrd.sql
+			$ORACLE_HOME/perl/bin/perl $ORACLE_HOME/rdbms/admin/catctl.pl $ORACLE_HOME/rdbms/admin/catupgrd.sql
+			
+		Run Upgrade with 8 parallel process
+		$ cd $ORACLE_HOME/rdbms/admin
+		$ $ORACLE_HOME/perl/bin/perl catctl.pl -n 8 catupgrd.sql
+		
+	Execute Post-Upgrade Status Tool, utlu122s.sql and review the upgrade spool log file.  You run the Post-Upgrade Status Tool in the environment of the new release.
+		$sqlplus "/as sysdba"
+		SQL> STARTUP
+		SQL> @utlu122s.sql
+		
+	Verify the upgrade log whether catuppst.sql has been executed or not.  If not, execute it manually from new ORACLE_HOME, located at $ORACLE_HOME/rdbms/admin directory
+	SQL> @catuppst.sql  
+	
+	Run utlrp.sql to recompile any remaining stored PL/SQL and Java code in another session.
+	SQL> @utlrp.sql
+	
+	Run dbupgdiag.sql to verify Database Integrity (Note 556610.1)
+	SQL>@dbupgdiag.sql
+
+
+Step 8: Post-upgrade
+--------------------
+
+	Execute Post-upgrade fixup script
+		/u01/app/oracle/PROD/cfgtoollogs/database/preupgrade/postupgrade_fixups.sql
+		
+	Upgrading Tables Dependent on Oracle-Maintained Types
+		Starting with Oracle Database 12c release 2 (12.2), you must manually upgrade user tables that depend on Oracle-Maintained types.	
+		To identify tables that need to be upgraded after the database upgrade, connect AS SYSDBA and run the following query:
+			COLUMN owner FORMAT A30
+			COLUMN table_name FORMAT A30
+			SELECT DISTINCT owner, table_name FROM dba_tab_cols WHERE data_upgraded = 'NO' ORDER BY 1,2;
+		Execute utluptabdata.sql script either with a user account with the privileges to ALTER all of the tables dependent on Oracle-Maintained types, or with a user granted the SYSDBA system privileges that is logged in AS SYSDBA.
+			SET SERVEROUTPUT ON
+			@utluptabdata.sql
+			
+	Upgrade the Time Zone File Version After Upgrading Oracle Database
+		
